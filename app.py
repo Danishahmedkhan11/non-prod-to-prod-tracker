@@ -3,6 +3,25 @@ import pandas as pd
 import datetime
 from databricks import sql
 import os
+import sys
+import subprocess
+
+# --- SELF-STARTING WRAPPER ---
+# If this script is run via 'python app.py', relaunch it with 'streamlit run app.py'
+def ensure_streamlit():
+    if "streamlit" not in sys.argv[0] and "run" not in sys.argv:
+        print("Relaunching app with streamlit...")
+        subprocess.run([
+            "streamlit", "run", sys.argv[0], 
+            "--server.port", "8080", 
+            "--server.address", "0.0.0.0"
+        ])
+        sys.exit()
+
+if __name__ == "__main__":
+    if "STREAMLIT_SERVER_PORT" not in os.environ:
+        ensure_streamlit()
+# -----------------------------
 
 # Set page configuration
 st.set_page_config(layout="wide", page_title="Non-Prod to Prod Connection Tracker")
