@@ -1,0 +1,9 @@
+# Databricks App Configuration
+bundle:
+  name: non-prod-to-prod-tracker
+
+app:
+  name: non-prod-to-prod-tracker
+  entry_point: app.py
+  # Note: The SQL Warehouse path will be injected via environment variables 
+  # during the Databricks App setup in the UI.
