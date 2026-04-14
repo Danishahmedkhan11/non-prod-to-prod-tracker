@@ -3,116 +3,129 @@ import pandas as pd
 import datetime
 from databricks import sql
 import os
-import sys
-import subprocess
+import plotly.express as px
 
-# --- SELF-STARTING WRAPPER ---
-# If this script is run via 'python app.py', relaunch it with 'streamlit run app.py'
-def ensure_streamlit():
-    if "streamlit" not in sys.argv[0] and "run" not in sys.argv:
-        print("Relaunching app with streamlit...")
-        subprocess.run([
-            "streamlit", "run", sys.argv[0], 
-            "--server.port", "8080", 
-            "--server.address", "0.0.0.0"
-        ])
-        sys.exit()
+# Set page configuration for a wide, professional layout
+st.set_page_config(layout="wide", page_title="Non-Prod to Prod Bridge Tracker", page_icon="🛡️")
 
-if __name__ == "__main__":
-    if "STREAMLIT_SERVER_PORT" not in os.environ:
-        ensure_streamlit()
-# -----------------------------
-
-# Set page configuration
-st.set_page_config(layout="wide", page_title="Non-Prod to Prod Connection Tracker")
-
-# App Header
-st.title("🛡️ Non-Prod to Prod Connection Tracker")
+# --- CUSTOM CSS FOR STYLING ---
 st.markdown("""
-This app monitors and highlights access patterns where users in **Non-Production** workspaces (Dev, QA, DR) 
-are querying **Production** catalogs. 
-- **Cross-Env Access**: Access from `-d-` (Dev) or `-q-` (QA) to `*_prod`.
-- **Monitored (DR)**: Access from `-r-` (DR) to `*_prod`.
+<style>
+    .main {
+        background-color: #f8f9fa;
+    }
+    .stMetric {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    div[data-testid="stExpander"] {
+        background-color: #ffffff;
+        border-radius: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- APP HEADER ---
+st.title("🛡️ Non-Prod to Prod Bridge Tracker")
+st.info("""
+This dashboard identifies users active in both **Non-Production** and **Production** workspaces. 
+Bridging environments can be a security risk if not strictly managed.
 """)
 
-# Sidebar Filters
-st.sidebar.header("Filter Options")
-today = datetime.date.today()
-start_date = st.sidebar.date_input("Start Date", today - datetime.timedelta(days=30))
-end_date = st.sidebar.date_input("End Date", today)
+# --- SIDEBAR FILTERS ---
+st.sidebar.header("🗓️ Filter Options")
+days_range = st.sidebar.slider("Analysis Window (Days)", 1, 90, 90)
 
-env_filter = st.sidebar.multiselect(
-    "Source Environments",
-    ["DEV", "QA", "DR"],
-    default=["DEV", "QA", "DR"]
-)
+# Search filter for specific users
+user_search = st.sidebar.text_input("🔍 Search User Email", "")
 
-# SQL Query Construction
-# Note: workspace name split_part(workspace_name, '-', 3) extracts 'd', 'q', or 'r'
-QUERY = """
-WITH workspace_env AS (
-    SELECT 
-        workspace_id,
+# --- THE VERIFIED SQL QUERY ---
+# We parameterize the interval (days) to match the slider
+QUERY = f"""
+WITH v_workspace_environment AS (
+    SELECT
+        account_id,
+        CAST(workspace_id AS STRING) AS workspace_id,
         workspace_name,
-        CASE 
-            WHEN split_part(workspace_name, '-', 3) = 'd' THEN 'DEV'
-            WHEN split_part(workspace_name, '-', 3) = 'q' THEN 'QA'
-            WHEN split_part(workspace_name, '-', 3) = 'r' THEN 'DR'
-            WHEN split_part(workspace_name, '-', 3) = 'p' THEN 'PROD'
-            ELSE 'OTHER'
+        workspace_url,
+        status,
+        CASE
+            WHEN lower(workspace_name) RLIKE '(^|[-_])(p|prod|production)($|[-_])'
+                THEN 'PROD'
+            WHEN lower(workspace_name) RLIKE '(^|[-_])(d|dev|development|q|qa|test|tst|uat|stage|stg|b)($|[-_])'
+                THEN 'NON_PROD'
+            ELSE 'UNKNOWN'
         END AS env_type
     FROM system.access.workspaces_latest
+    WHERE status = 'RUNNING'
 ),
-lineage_access AS (
-    SELECT 
-        l.event_time,
-        l.workspace_id AS source_workspace_id,
-        l.user_identity.email AS user_email,
-        split_part(l.source_table_full_name, '.', 1) AS catalog_name,
-        l.source_table_full_name AS table_name
-    FROM system.access.table_lineage l
-    WHERE split_part(l.source_table_full_name, '.', 1) LIKE '%_prod'
-      AND l.event_time BETWEEN :start_date AND :end_date
+v_user_workspace_activity_90d AS (
+    SELECT
+        a.account_id,
+        CAST(a.workspace_id AS STRING) AS workspace_id,
+        a.event_time,
+        a.user_identity.email AS user_email,
+        a.service_name,
+        a.action_name,
+        w.workspace_name,
+        w.workspace_url,
+        w.env_type
+    FROM system.access.audit a
+    INNER JOIN v_workspace_environment w
+        ON CAST(a.workspace_id AS STRING) = w.workspace_id
+    WHERE a.user_identity.email IS NOT NULL
+      AND CAST(a.workspace_id AS STRING) <> '0'
+      AND w.env_type IN ('PROD', 'NON_PROD')
+      AND a.event_time >= current_timestamp() - INTERVAL {days_range} DAYS
+),
+v_user_env_summary_90d AS (
+    SELECT
+        user_email,
+        env_type,
+        COLLECT_SET(workspace_name) AS workspace_names,
+        MIN(event_time) AS first_seen,
+        MAX(event_time) AS last_seen,
+        COUNT(*) AS total_events,
+        COUNT(DISTINCT workspace_id) AS workspace_count
+    FROM v_user_workspace_activity_90d
+    GROUP BY user_email, env_type
 )
-SELECT 
-    a.event_time,
-    w.workspace_name AS source_workspace,
-    w.env_type AS source_env,
-    a.user_email,
-    a.catalog_name,
-    a.table_name,
-    CASE 
-        WHEN w.env_type = 'DR' THEN 'Monitored (DR)'
-        ELSE 'Cross-Env Access'
-    END AS status
-FROM lineage_access a
-JOIN workspace_env w ON a.source_workspace_id = w.workspace_id
-WHERE w.env_type IN ('DEV', 'QA', 'DR')
-ORDER BY a.event_time DESC
+SELECT
+    np.user_email,
+    np.workspace_names AS non_prod_workspaces,
+    p.workspace_names  AS prod_workspaces,
+    np.workspace_count AS non_prod_workspace_count,
+    p.workspace_count  AS prod_workspace_count,
+    np.total_events    AS non_prod_events,
+    p.total_events     AS prod_events,
+    np.first_seen      AS non_prod_first_seen,
+    np.last_seen       AS non_prod_last_seen,
+    p.first_seen       AS prod_first_seen,
+    p.last_seen        AS prod_last_seen
+FROM v_user_env_summary_90d np
+INNER JOIN v_user_env_summary_90d p
+    ON np.user_email = p.user_email
+WHERE np.env_type = 'NON_PROD'
+  AND p.env_type = 'PROD'
+ORDER BY prod_last_seen DESC, prod_events DESC
 """
 
-def get_data():
+@st.cache_data(ttl=300)
+def get_bridging_data():
     try:
-        # These environment variables are automatically set in a Databricks App
         host = os.getenv("DATABRICKS_HOST")
-        http_path = os.getenv("DATABRICKS_HTTP_PATH") # The SQL Warehouse to use
+        http_path = os.getenv("DATABRICKS_HTTP_PATH")
         token = os.getenv("DATABRICKS_TOKEN")
 
         if not host or not http_path:
-            st.warning("⚠️ **Missing Configuration**: Please set the `DATABRICKS_HTTP_PATH` environment variable in the App settings (e.g., `/sql/1.0/warehouses/123456789`).")
+            st.warning("⚠️ **App Configuration Required**: Please set the `DATABRICKS_HTTP_PATH` environment variable.")
             return pd.DataFrame()
 
-        # Connect using the Service Principal identity provided to the app
-        with sql.connect(
-            server_hostname=host,
-            http_path=http_path,
-            access_token=token
-        ) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(QUERY, {
-                    "start_date": start_date.strftime("%Y-%m-%d"),
-                    "end_date": end_date.strftime("%Y-%m-%d")
-                })
+        with sql.connect(server_hostname=host, http_path=http_path, access_token=token) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(QUERY)
                 result = cursor.fetchall()
                 if not result:
                     return pd.DataFrame()
@@ -122,47 +135,83 @@ def get_data():
         st.error(f"❌ **Connection Error**: {e}")
         return pd.DataFrame()
 
-# Data Fetching
-@st.cache_data(ttl=300) # Cache data for 5 minutes
-def cached_fetch(start, end):
-    return get_data()
-
-df = cached_fetch(start_date, end_date)
+# Fetch and filter data
+df = get_bridging_data()
 
 if not df.empty:
-    # Client-side environment filter
-    filtered_df = df[df['source_env'].isin(env_filter)]
+    if user_search:
+        df = df[df['user_email'].str.contains(user_search, case=False)]
 
-    # KPI Metrics
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Connections", len(filtered_df))
-    c2.metric("Cross-Env Access (D/Q)", len(filtered_df[filtered_df['source_env'].isin(['DEV', 'QA'])]))
-    c3.metric("Monitored DR Access", len(filtered_df[filtered_df['source_env'] == 'DR']))
+    # --- TOP KPI METRICS ---
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Bridging Users", len(df))
+    col2.metric("Total Prod Events", f"{df['prod_events'].sum():,}")
+    col3.metric("Avg Prod WS/User", round(df['prod_workspace_count'].mean(), 1))
+    col4.metric("Avg Non-Prod WS/User", round(df['non_prod_workspace_count'].mean(), 1))
 
-    # Visualizations
-    st.subheader("📊 Connection Trends")
-    filtered_df['date'] = pd.to_datetime(filtered_df['event_time']).dt.date
-    trend_data = filtered_df.groupby(['date', 'status']).size().reset_index(name='count')
-    st.line_chart(trend_data.pivot(index='date', columns='status', values='count').fillna(0))
+    st.markdown("---")
 
-    # Detailed Table
-    st.subheader("🔍 Detailed Access Logs")
-    st.dataframe(filtered_df, use_container_width=True)
+    # --- VISUALIZATIONS ---
+    v1, v2 = st.columns(2)
 
-    # Top Offenders / Active Users
-    st.subheader("👤 Top Users by Environment")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("Top Cross-Env Users (Dev/QA)")
-        top_users = filtered_df[filtered_df['source_env'].isin(['DEV', 'QA'])]['user_email'].value_counts().head(5)
-        st.bar_chart(top_users)
-    with col2:
-        st.write("Most Accessed Prod Catalogs")
-        top_catalogs = filtered_df['catalog_name'].value_counts().head(5)
-        st.bar_chart(top_catalogs)
+    with v1:
+        st.subheader("🔥 Top 10 High-Activity Bridgers")
+        # Bubble chart showing Prod Events vs Non-Prod Events
+        fig = px.scatter(df.head(10), 
+                         x="non_prod_events", 
+                         y="prod_events", 
+                         size="prod_workspace_count", 
+                         hover_name="user_email",
+                         color="prod_workspace_count",
+                         labels={"non_prod_events": "Non-Prod Actions", "prod_events": "Prod Actions"},
+                         title="Activity Density (Prod vs Non-Prod)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with v2:
+        st.subheader("🌐 Workspace Distribution")
+        # Bar chart showing count of Prod Workspaces per user
+        ws_dist = df['prod_workspace_count'].value_counts().reset_index()
+        ws_dist.columns = ['Workspaces', 'User Count']
+        fig2 = px.bar(ws_dist, x='Workspaces', y='User Count', 
+                      title="Users by # of Prod Workspaces Accessed",
+                      color_discrete_sequence=['#ff4b4b'])
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # --- DATA EXPLORATION TABLE ---
+    st.subheader("🔍 Bridging User Details")
+    st.markdown("Sorted by **Latest Production Activity**")
+    
+    # Format dates for display
+    display_df = df.copy()
+    display_df['prod_last_seen'] = pd.to_datetime(display_df['prod_last_seen']).dt.strftime('%Y-%m-%d %H:%M')
+    
+    st.dataframe(display_df[[
+        'user_email', 'prod_last_seen', 'prod_events', 'non_prod_events', 
+        'prod_workspaces', 'non_prod_workspaces'
+    ]], use_container_width=True)
+
+    # --- USER SEARCH / DEEP DIVE ---
+    if not df.empty:
+        st.sidebar.markdown("---")
+        selected_user = st.sidebar.selectbox("🎯 Select User for Deep Dive", df['user_email'].tolist())
+        
+        if selected_user:
+            user_data = df[df['user_email'] == selected_user].iloc[0]
+            with st.expander(f"📌 Detailed Timeline for {selected_user}", expanded=False):
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.write("**Production Activity**")
+                    st.write(f"First Seen: {user_data['prod_first_seen']}")
+                    st.write(f"Last Seen: {user_data['prod_last_seen']}")
+                    st.write(f"Workspaces: `{user_data['prod_workspaces']}`")
+                with d2:
+                    st.write("**Non-Production Activity**")
+                    st.write(f"First Seen: {user_data['non_prod_first_seen']}")
+                    st.write(f"Last Seen: {user_data['non_prod_last_seen']}")
+                    st.write(f"Workspaces: `{user_data['non_prod_workspaces']}`")
 
 else:
-    st.info("No connections found matching the criteria in the selected date range.")
+    st.info("✅ No bridging activity detected in the selected timeframe.")
 
 st.sidebar.markdown("---")
-st.sidebar.info("Developed for Databricks Non-Prod to Prod Monitoring.")
+st.sidebar.caption("Powered by Databricks System Tables (system.access.audit)")
