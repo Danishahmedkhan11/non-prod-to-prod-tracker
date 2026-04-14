@@ -80,9 +80,10 @@ def get_data():
         token = os.getenv("DATABRICKS_TOKEN")
 
         if not host or not http_path:
-            st.warning("Running locally or missing SQL Warehouse config. Please ensure environment variables are set.")
+            st.warning("⚠️ **Missing Configuration**: Please set the `DATABRICKS_HTTP_PATH` environment variable in the App settings (e.g., `/sql/1.0/warehouses/123456789`).")
             return pd.DataFrame()
 
+        # Connect using the Service Principal identity provided to the app
         with sql.connect(
             server_hostname=host,
             http_path=http_path,
@@ -94,14 +95,20 @@ def get_data():
                     "end_date": end_date.strftime("%Y-%m-%d")
                 })
                 result = cursor.fetchall()
+                if not result:
+                    return pd.DataFrame()
                 df = pd.DataFrame(result, columns=[desc[0] for desc in cursor.description])
                 return df
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.error(f"❌ **Connection Error**: {e}")
         return pd.DataFrame()
 
 # Data Fetching
-df = get_data()
+@st.cache_data(ttl=300) # Cache data for 5 minutes
+def cached_fetch(start, end):
+    return get_data()
+
+df = cached_fetch(start_date, end_date)
 
 if not df.empty:
     # Client-side environment filter

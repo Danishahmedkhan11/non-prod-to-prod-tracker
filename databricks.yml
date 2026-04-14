@@ -4,6 +4,12 @@ bundle:
 
 app:
   name: non-prod-to-prod-tracker
-  entry_point: app.py
-  # Note: The SQL Warehouse path will be injected via environment variables 
-  # during the Databricks App setup in the UI.
+  # Use command instead of entry_point to ensure streamlit starts correctly
+  command:
+    - "streamlit"
+    - "run"
+    - "app.py"
+    - "--server.port"
+    - "8080"
+    - "--server.address"
+    - "0.0.0.0"
