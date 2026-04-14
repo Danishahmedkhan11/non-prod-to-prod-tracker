@@ -1,15 +1,8 @@
-# Databricks App Configuration
-bundle:
-  name: non-prod-to-prod-tracker
-
-app:
-  name: non-prod-to-prod-tracker
-  # Use command instead of entry_point to ensure streamlit starts correctly
-  command:
-    - "streamlit"
-    - "run"
-    - "app.py"
-    - "--server.port"
-    - "8080"
-    - "--server.address"
-    - "0.0.0.0"
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port
+  - "8080"
+  - --server.address
+  - 0.0.0.0
